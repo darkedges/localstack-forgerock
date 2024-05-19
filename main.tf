@@ -131,10 +131,14 @@ resource "aws_api_gateway_integration" "forgerock" {
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
   uri                     = aws_lambda_function.hello_world.invoke_arn
-  passthrough_behavior = "WHEN_NO_MATCH"
+  passthrough_behavior    = "WHEN_NO_MATCH"
 }
 
 resource "aws_api_gateway_deployment" "forgerock" {
+  depends_on = [
+    aws_api_gateway_method.forgerock,
+    aws_api_gateway_integration.forgerock
+  ]
   rest_api_id = aws_api_gateway_rest_api.forgerock.id
 
   triggers = {
@@ -152,13 +156,15 @@ resource "aws_api_gateway_stage" "forgerock" {
   stage_name    = "forgerock"
 }
 
+data "aws_region" "current" {}
+
 resource "aws_lambda_permission" "apigw_lambda" {
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.hello_world.function_name
 
-  principal     = "apigateway.amazonaws.com"
-  source_arn = "arn:aws:execute-api:eu-west-1:000000000000:${aws_api_gateway_rest_api.forgerock.id}/*/${aws_api_gateway_method.forgerock.http_method}${aws_api_gateway_resource.forgerock.path}"
+  principal  = "apigateway.amazonaws.com"
+  source_arn = "arn:aws:execute-api:${data.aws_region.current.name}:000000000000:${aws_api_gateway_rest_api.forgerock.id}/*/${aws_api_gateway_method.forgerock.http_method}${aws_api_gateway_resource.forgerock.path}"
 }
 
 resource "aws_api_gateway_domain_name" "forgerock" {
@@ -173,3 +179,93 @@ resource "aws_api_gateway_base_path_mapping" "backend" {
   api_id      = aws_api_gateway_rest_api.forgerock.id
   domain_name = aws_api_gateway_domain_name.forgerock.domain_name
 }
+
+resource "aws_wafv2_ip_set" "forgerock" {
+  name               = "Home"
+  description        = "HomeIP Set"
+  scope              = "REGIONAL"
+  ip_address_version = "IPV4"
+  addresses          = ["127.0.0.1/32"]
+}
+
+resource "aws_wafv2_web_acl" "forgerock" {
+  name  = "forgerock"
+  scope = "REGIONAL"
+
+  default_action {
+    block {
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "WAF_ForgeRock"
+    sampled_requests_enabled   = true
+  }
+
+  rule {
+    name     = "HomeIPAllowed"
+    priority = 0
+    action {
+      allow {}
+    }
+    statement {
+      and_statement {
+        statement {
+          regex_match_statement {
+            regex_string = "/openam/json/realms/root/realms/internal|external/authenticate"
+            field_to_match {
+              uri_path {
+              }
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+        statement {
+          regex_match_statement {
+            regex_string = "^ExternalLogin$|^InternalLogin$"
+            field_to_match {
+              single_query_argument {
+                name = "authindexvalue"
+              }
+            }
+            text_transformation {
+              priority = 0
+              type     = "NONE"
+            }
+          }
+        }
+        statement {
+          ip_set_reference_statement {
+            arn = aws_wafv2_ip_set.forgerock.arn
+          }
+        }
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AuthTree"
+      sampled_requests_enabled   = true
+    }
+  }
+}
+
+resource "aws_wafv2_web_acl_logging_configuration" "forgerock" {
+  log_destination_configs = [aws_cloudwatch_log_group.waf.arn]
+  resource_arn            = aws_wafv2_web_acl.forgerock.arn
+}
+
+resource "aws_wafv2_web_acl_association" "forgerock" {
+  resource_arn = aws_api_gateway_stage.forgerock.arn
+  web_acl_arn  = aws_wafv2_web_acl.forgerock.arn
+}
+
+resource "aws_cloudwatch_log_group" "waf" {
+  name              = "aws-waf-logs-${aws_api_gateway_rest_api.forgerock.id}/forgerock"
+  retention_in_days = 7
+}
+
+
