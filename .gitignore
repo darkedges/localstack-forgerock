@@ -1,0 +1,6 @@
+.terraform.lock.hcl
+output.json
+terraform.tfstate
+terraform.tfstate.backup
+.terraform/
+*.zip
